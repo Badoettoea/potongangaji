@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Admin Dashboard</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="papaparse.min.js"></script>
   <script src="https://apis.google.com/js/api.js"></script>
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -32,6 +31,19 @@
       display: flex;
       align-items: center;
       gap: 0.5rem;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    th, td {
+      border: 1px solid #2dd4bf;
+      padding: 8px;
+      text-align: left;
+    }
+    th {
+      background-color: #e6fffa;
+      font-weight: 600;
     }
   </style>
 </head>
@@ -65,20 +77,15 @@
           <i class="fas fa-database mr-2"></i>Kelola Data Gaji
         </h2>
         <div class="bg-teal-50 p-4 rounded-lg mb-4">
-          <p class="text-teal-800 mb-2"><i class="fas fa-info-circle mr-2"></i>Upload file CSV dengan format data gaji terbaru</p>
+          <p class="text-teal-800 mb-2"><i class="fas fa-info-circle mr-2"></i>Data gaji dikelola langsung di Google Sheets.</p>
           <p class="text-teal-800 mb-2"><i class="fas fa-info-circle mr-2"></i>Kolom wajib: PIN, Role, Nama, NIP, L/P, Unit Kerja. Kolom potongan setelahnya boleh dinamis.</p>
           <button id="authButton" onclick="handleAuthClick()" class="btn-primary mb-4 ripple">
             <i class="fas fa-sign-in-alt mr-2"></i>Login with Google
           </button>
-          <input type="file" id="csvUpload" accept=".csv" class="block w-full text-sm text-gray-500
-            file:mr-4 file:py-2 file:px-4
-            file:rounded-lg file:border-0
-            file:text-sm file:font-semibold
-            file:bg-teal-100 file:text-teal-700
-            hover:file:bg-teal-200">
+          <div id="dataTableContainer"></div>
         </div>
-        <button id="uploadButton" onclick="uploadDatabase()" class="btn-primary ripple">
-          <i class="fas fa-upload mr-2"></i>Upload Data Gaji
+        <button id="loadButton" onclick="loadSheetData()" class="btn-primary ripple">
+          <i class="fas fa-sync-alt mr-2"></i>Refresh Data
         </button>
       </div>
 
@@ -99,7 +106,7 @@
 
   <script>
     const ADMIN_PIN = '12345678';
-    const CLIENT_ID = '300094509327-9i3jckrl1s5cri36g2km79gfgoocga01.apps.googleusercontent.com'; // Ganti dengan Client ID dari Google Cloud Console
+    const CLIENT_ID = '300094509327-mgnbt6d59kbtpgk1ne8u39ajegmlh3gf.apps.googleusercontent.com'; // Ganti dengan Client ID dari Google Cloud Console
     const API_KEY = 'AIzaSyBr9fZUPjJwI3QvAtMXq6L9UzVqvNuZBDM'; // Ganti dengan API Key
     const SPREADSHEET_ID = '1P-dKY2lCmr7Iq87cM066AkGOWE1IHisOeeJNi_FeqxA'; // Ganti dengan ID Google Sheet
     const SCOPES = 'https://www.googleapis.com/auth/spreadsheets';
@@ -130,13 +137,6 @@
           setTimeout(() => ripple.remove(), 600);
         });
       });
-
-      if (typeof Papa === 'undefined') {
-        console.error('PapaParse gagal load dari file lokal.');
-        alert('Library parsing CSV gagal load. Pastikan file papaparse.min.js ada di repo.');
-      } else {
-        console.log('PapaParse berhasil load dari file lokal!');
-      }
     });
 
     function initGoogleAPI() {
@@ -154,6 +154,7 @@
           accessToken = tokenResponse.access_token;
           document.getElementById('authButton').innerHTML = '<i class="fas fa-check mr-2"></i>Authenticated';
           document.getElementById('authButton').disabled = true;
+          loadSheetData(); // Load data setelah autentikasi
         },
       });
     }
@@ -164,81 +165,58 @@
       }
     }
 
-    async function uploadDatabase() {
-      const file = document.getElementById('csvUpload').files[0];
-      const uploadButton = document.getElementById('uploadButton');
-
-      if (!file) {
-        alert('Silakan pilih file CSV terlebih dahulu');
-        resetButton();
-        return;
-      }
+    async function loadSheetData() {
+      const loadButton = document.getElementById('loadButton');
+      const dataTableContainer = document.getElementById('dataTableContainer');
 
       if (!accessToken) {
         alert('Silakan login dengan Google terlebih dahulu');
-        resetButton();
         return;
       }
 
-      if (file.size > 1_000_000) {
-        alert('Ukuran file terlalu besar. Maksimal 1MB.');
-        resetButton();
-        return;
-      }
+      loadButton.disabled = true;
+      loadButton.classList.add('loading');
+      loadButton.innerHTML = '<i class="fas fa-sync-alt mr-2"></i>Loading...';
 
-      uploadButton.disabled = true;
-      uploadButton.classList.add('loading');
-      uploadButton.innerHTML = '<i class="fas fa-upload mr-2"></i>Uploading...';
+      try {
+        const response = await gapi.client.sheets.spreadsheets.values.get({
+          spreadsheetId: SPREADSHEET_ID,
+          range: 'Sheet1!A1:Z',
+        });
+        const values = response.result.values || [];
+        if (values.length === 0) {
+          dataTableContainer.innerHTML = '<p class="text-teal-800">Belum ada data di Google Sheets.</p>';
+          return;
+        }
 
-      Papa.parse(file, {
-        header: true,
-        complete: async function (results) {
-          const fixedColumns = ['PIN', 'Role', 'Nama', 'NIP', 'L/P', 'Unit Kerja'];
-          const csvColumns = Object.keys(results.data[0] || {});
-          const csvColumnsLower = csvColumns.map(col => col.toLowerCase());
-          const fixedColumnsLower = fixedColumns.map(col => col.toLowerCase());
-          const missingFixedColumns = fixedColumns.filter((col, index) => !csvColumnsLower.includes(fixedColumnsLower[index]));
+        // Validasi kolom wajib
+        const fixedColumns = ['PIN', 'Role', 'Nama', 'NIP', 'L/P', 'Unit Kerja'];
+        const headers = values[0].map(col => col.toLowerCase());
+        const missingColumns = fixedColumns.filter(col => !headers.includes(col.toLowerCase()));
+        if (missingColumns.length > 0) {
+          dataTableContainer.innerHTML = `<p class="text-red-600">Error: Kolom wajib hilang di Sheets: ${missingColumns.join(', ')}</p>`;
+          return;
+        }
 
-          if (missingFixedColumns.length > 0) {
-            alert(`Format CSV tidak valid. Kolom wajib yang hilang: ${missingFixedColumns.join(', ')}.`);
-            resetButton();
-            return;
-          }
-
-          try {
-            const values = [csvColumns, ...results.data.map(row => csvColumns.map(col => row[col] || ''))];
-
-            await gapi.client.sheets.spreadsheets.values.clear({
-              spreadsheetId: SPREADSHEET_ID,
-              range: 'Sheet1!A1:Z',
-            });
-
-            await gapi.client.sheets.spreadsheets.values.update({
-              spreadsheetId: SPREADSHEET_ID,
-              range: 'Sheet1!A1',
-              valueInputOption: 'RAW',
-              resource: { values },
-            });
-
-            alert('Data gaji berhasil diupload ke Google Sheets!');
-            window.location.reload();
-          } catch (error) {
-            console.error('Error uploading to Google Sheets:', error);
-            alert(`Gagal mengupload ke Google Sheets: ${error.message}`);
-            resetButton();
-          }
-        },
-        error: function (error) {
-          console.error('Error parsing CSV:', error);
-          alert('Format file CSV tidak valid.');
-          resetButton();
-        },
-      });
-
-      function resetButton() {
-        uploadButton.disabled = false;
-        uploadButton.classList.remove('loading');
-        uploadButton.innerHTML = '<i class="fas fa-upload mr-2"></i>Upload Data Gaji';
+        // Buat tabel
+        const table = document.createElement('table');
+        table.innerHTML = `
+          <thead>
+            <tr>${values[0].map(col => `<th>${col}</th>`).join('')}</tr>
+          </thead>
+          <tbody>
+            ${values.slice(1).map(row => `<tr>${row.map(cell => `<td>${cell || ''}</td>`).join('')}</tr>`).join('')}
+          </tbody>
+        `;
+        dataTableContainer.innerHTML = '';
+        dataTableContainer.appendChild(table);
+      } catch (error) {
+        console.error('Error loading sheet data:', error);
+        dataTableContainer.innerHTML = `<p class="text-red-600">Gagal memuat data: ${error.message}</p>`;
+      } finally {
+        loadButton.disabled = false;
+        loadButton.classList.remove('loading');
+        loadButton.innerHTML = '<i class="fas fa-sync-alt mr-2"></i>Refresh Data';
       }
     }
 
